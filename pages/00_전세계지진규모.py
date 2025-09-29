@@ -190,5 +190,41 @@ def _filter_by_country(df_in, country_name):
     if not feats:
         return pd.DataFrame(columns=df_in.columns)
     parts = []
-    for _, row in d_
+    for _, row in df_in.iterrows():
+        pt = (row[lon], row[lat])  # (x,y)=(lon,lat)
+        inside_any = False
+        for ft in feats:
+            geom = ft["geometry"]
+            if geom["type"] == "Polygon":
+                if _point_in_poly(pt, geom["coordinates"]):
+                    inside_any = True; break
+            elif geom["type"] == "MultiPolygon":
+                if _in_multipolygon(pt, geom["coordinates"]):
+                    inside_any = True; break
+        if inside_any:
+            parts.append(row)
+    if not parts: 
+        return pd.DataFrame(columns=df_in.columns)
+    sub = pd.DataFrame(parts)
+    sub = sub.sort_values(by=tim, ascending=False)
+    return sub.head(3)
 
+top3 = _filter_by_country(df, sel_country)
+
+if len(top3)==0 and sel_country!="(선택하지 않음)":
+    st.warning("선택한 국가 경계 내에서 조건을 만족하는 지진을 찾지 못했습니다.")
+st.dataframe(top3[[tim, lat, lon, mag]].rename(columns={
+    tim:"time", lat:"latitude", lon:"longitude", mag:"magnitude"
+}), use_container_width=True)
+
+# 다운로드
+if len(top3):
+    st.download_button("⬇️ 최신 3건 CSV 다운로드",
+        data=top3.to_csv(index=False).encode("utf-8"),
+        file_name=f"top3_{sel_country.replace(' ','_')}.csv", mime="text/csv")
+
+# 이모지 범례
+st.markdown("""
+**색상 범례(규모)**  
+🟨 4.0 미만 · 🟧 4.0–4.9 · 🟠 5.0–5.9 · 🟥 6.0–6.9 · 🧨 7.0+
+""")
