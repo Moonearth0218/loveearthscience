@@ -1,5 +1,4 @@
 import io
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -11,7 +10,7 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="🌍 전세계 지진 규모 지도", page_icon="🌍", layout="wide")
 st.title("🌍 전세계 지진 규모 지도")
-st.caption("정수 규모 구간과 진원 깊이 구간을 한 지도에서 확인할 수 있습니다. (작을수록 노랑→주황→진한 붉은색)")
+st.caption("정수 규모 구간과 진원 깊이 구간을 한 지도에서 확인할 수 있습니다. (규모: 노랑→주황→진한 붉은색, 깊이: 하늘→파랑→짙은 파랑)")
 
 # ─────────────────────────────────────────────────────────
 # 유틸
@@ -38,36 +37,26 @@ def make_mag_bin_label(m: pd.Series) -> pd.Series:
         return f"{v}.0–{v}.9" if v < 10 else "10.0"
     return mf.map(lab)
 
-# 사용자 지정 규모 색상 스케일(노랑 → 주황 → 아주 진한 붉은색)
-# positions 0.0, 0.55, 1.0 정도로 배치해서 작은 규모는 연하고, 큰 규모는 진하게 보이게 함
-MAG_COLORSCALE = [
-    (0.00, "#FFF59D"),  # 밝은 노랑 (작은 규모)
-    (0.55, "#FB8C00"),  # 선명한 주황 (중간 규모)
-    (1.00, "#B71C1C"),  # 아주 진한 붉은색 (큰 규모)
-]
-
 def build_mag_colors(labels_order):
-    """정수 구간 라벨들을 0→1 구간에 균등 매핑해 MAG_COLORSCALE에서 색 샘플링."""
+    """
+    정수 구간 라벨을 0~10 인덱스로 보고 0~1에 정규화 → Plotly 'YlOrRd'에서 색 샘플링.
+    작은 규모는 밝은 노랑, 커질수록 주황, 최댓값은 진한 붉은색.
+    """
     if not labels_order:
         return {}
-    # 0~10 전체 구간 기준 위치를 계산 (데이터에 존재하는 구간만 뽑음)
-    # 0~9: 'x.0–x.9', 10: '10.0' (마지막은 최댓값에 대응)
     def bin_index(label):
         return 10 if label == "10.0" else int(label.split(".")[0])
-    idxs = [bin_index(lab) for lab in labels_order]
-    pos = np.array(idxs) / 10.0
-    # colorscale 샘플
-    colors = []
-    for p in pos:
-        colors.append(px.colors.sample_colorscale(MAG_COLORSCALE, [p])[0])
-    return {lab: colors[i] for i, lab in enumerate(labels_order)}
+    pos = np.array([bin_index(l) for l in labels_order], dtype=float) / 10.0  # 0.0~1.0
+    # 안전하게 리스트로 전달
+    sampled = px.colors.sample_colorscale("YlOrRd", pos.tolist())
+    return dict(zip(labels_order, sampled))
 
 def depth_category(d: pd.Series) -> pd.Series:
     """깊이 구간 라벨: 천발(0–70), 중발(70–300), 심발(>300)"""
     cat = pd.Series(index=d.index, dtype=object)
-    cat[(d >= 0) & (d < 70)]  = "천발(0–70km)"
+    cat[(d >= 0) & (d < 70)]    = "천발(0–70km)"
     cat[(d >= 70) & (d <= 300)] = "중발(70–300km)"
-    cat[(d > 300)]            = "심발(>300km)"
+    cat[(d > 300)]              = "심발(>300km)"
     return cat
 
 # ─────────────────────────────────────────────────────────
@@ -125,7 +114,7 @@ def load_quakes(file_bytes: bytes, filename: str = "uploaded") -> pd.DataFrame:
     raise RuntimeError(f"알 수 없는 파일 형식입니다: {filename}")
 
 # ─────────────────────────────────────────────────────────
-# 정제: 자동 감지 (+ 수동 매핑 폴백은 필요 시 제공)
+# 정제: 자동 감지 (+ 수동 매핑 폴백)
 # ─────────────────────────────────────────────────────────
 def auto_clean(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
@@ -260,20 +249,18 @@ if place_query and "place" in f.columns:
 # ─────────────────────────────────────────────────────────
 traces = []
 
-# (A) 규모 레이어 (원, 구간별-그라데이션 색)
+# (A) 규모 레이어 (원, 구간별-그라데이션 색: YlOrRd 샘플)
 if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
-    f = f.copy()
-    f["mag_bin"] = make_mag_bin_label(f["magnitude"])
+    f_mag = f.copy()
+    f_mag["mag_bin"] = make_mag_bin_label(f_mag["magnitude"])
     order_all = [f"{i}.0–{i}.9" for i in range(0,10)] + ["10.0"]
-    labels_order = [lab for lab in order_all if lab in set(f["mag_bin"].dropna().unique())]
+    labels_order = [lab for lab in order_all if lab in set(f_mag["mag_bin"].dropna().unique())]
     mag_color_map = build_mag_colors(labels_order)
 
-    # 구간별 trace (범례 가독성)
     for lab in labels_order:
-        dfb = f[f["mag_bin"] == lab]
-        if dfb.empty: 
+        dfb = f_mag[f_mag["mag_bin"] == lab]
+        if dfb.empty:
             continue
-        # 규모가 클수록 원도 조금 더 크게(시각 강조)
         size_vals = np.clip((dfb["magnitude"].fillna(dfb["magnitude"].median())*2.0), 5, 20)
         traces.append(go.Scattergeo(
             lon=dfb["longitude"], lat=dfb["latitude"],
@@ -296,19 +283,18 @@ if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
             ], axis=1)
         ))
 
-# (B) 깊이 레이어 (삼각형)
+# (B) 깊이 레이어 (삼각형: 하늘색/파란색/짙은 파랑)
 if show_depth and "depth_km" in f.columns and f["depth_km"].notna().any():
-    f = f.copy()
-    f["depth_cat"] = depth_category(f["depth_km"])
+    f_dep = f.copy()
+    f_dep["depth_cat"] = depth_category(f_dep["depth_km"])
     depth_order = ["천발(0–70km)", "중발(70–300km)", "심발(>300km)"]
-    # 색상: 하늘색, 파란색, 어두운 푸른색
     depth_colors = {
-        "천발(0–70km)": "#87CEEB",  # SkyBlue
-        "중발(70–300km)": "#1976D2", # Blue-ish
-        "심발(>300km)": "#0D47A1",  # Dark Blue
+        "천발(0–70km)": "#87CEEB",  # 하늘색
+        "중발(70–300km)": "#1976D2", # 파란색
+        "심발(>300km)": "#0D47A1",  # 어두운 푸른색
     }
     for lab in depth_order:
-        dfd = f[f["depth_cat"] == lab]
+        dfd = f_dep[f_dep["depth_cat"] == lab]
         if dfd.empty:
             continue
         traces.append(go.Scattergeo(
