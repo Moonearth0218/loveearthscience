@@ -5,33 +5,15 @@ from pathlib import Path
 import io
 import plotly.express as px
 
-# --------------------
-# 기본 설정
-# --------------------
-st.set_page_config(page_title="🌍 지진 데이터 월드맵", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="🗺️ 지진 월드맵", page_icon="🗺️", layout="wide")
 
-st.title("🌍 지진 데이터 월드맵")
-st.caption("KMA 국외지진목록 데이터를 기반으로 규모(M)별 전세계 지진을 시각화합니다. (Plotly)")
+st.title("🗺️ 전세계 지진 분포 (국외지진목록)")
+st.caption("KMA 국외지진목록 데이터를 업로드하여 규모(M) 정수 구간별 색상으로 시각화합니다.")
 
-st.markdown(
-    """
-    **사용법**  
-    1) 아래에서 파일을 선택하거나, 기본 파일명을 그대로 사용합니다.  
-    2) 왼쪽 사이드바에서 기간/규모/깊이/지역 필터를 조정하세요.  
-    3) 지도를 확대/이동하면 상세 위치와 정보를 툴팁으로 확인할 수 있어요.  
-    """
-)
-
-# --------------------
-# 데이터 로더
-# --------------------
 DEFAULT_FILE = "국외지진목록_2015-01-01_2025-09-29.xls"
 
 def read_kma_xls_like(file_obj_or_path):
-    """
-    KMA 국외지진목록 .xls은 실제로 HTML 테이블인 경우가 많음.
-    pandas.read_html로 읽어 1번째 테이블을 반환.
-    """
+    """KMA 국외지진목록 .xls(실제는 HTML 테이블) 로딩"""
     try:
         tables = pd.read_html(file_obj_or_path)  # lxml 필요
         if len(tables) == 0:
@@ -41,11 +23,9 @@ def read_kma_xls_like(file_obj_or_path):
         raise RuntimeError(f"HTML 테이블 파싱 실패: {e}")
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    # 문자열 공백 정리 (DataFrame은 applymap 사용)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
 
-    # 컬럼 탐지 유틸
     def find_col(cols, keywords):
         for c in cols:
             lc = c.lower()
@@ -54,8 +34,6 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return None
 
     cols = df.columns.tolist()
-
-    # 흔한 컬럼명 후보(한국어/영문 혼합 지원)
     col_time_utc = find_col(cols, ["발생일시(utc)", "utc"])
     col_time_kst = find_col(cols, ["발생일시(kst)", "kst"])
     col_time_any = find_col(cols, ["발생일시", "date", "time", "일시"])
@@ -67,13 +45,10 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     col_remark = find_col(cols, ["비고", "remark", "참고"])
 
     out = pd.DataFrame()
-
-    # 시각: UTC > KST > ANY 순으로 우선
     time_col = col_time_utc or col_time_kst or col_time_any
     if time_col:
         out["time"] = pd.to_datetime(df[time_col], errors="coerce")
 
-    # 숫자형 변환(쉼표 제거)
     def to_num(s):
         return pd.to_numeric(pd.Series(s).astype(str).str.replace(",", ""), errors="coerce")
 
@@ -84,26 +59,20 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if col_place: out["place"]     = df[col_place].astype(str)
     if col_remark:out["remark"]    = df[col_remark].astype(str)
 
-    # 유효 범위 필터(위도/경도 기본 품질 확보)
     if "latitude" in out and "longitude" in out:
         out = out[(out["latitude"].between(-90, 90)) & (out["longitude"].between(-180, 180))]
-
-    # 정렬
     if "time" in out:
         out = out.sort_values("time").reset_index(drop=True)
 
     return out
 
-# --------------------
-# 파일 입력
-# --------------------
+# 파일 입력 영역
 left, right = st.columns([1, 1])
 with left:
     st.subheader("📁 데이터 선택")
     up = st.file_uploader("국외지진목록(.xls / HTML 테이블 형식) 파일 업로드", type=["xls", "html", "htm"])
     use_default = st.toggle(f"기본 파일명 사용: `{DEFAULT_FILE}`", value=True)
 
-# 데이터 읽기
 df_raw = None
 if up is not None:
     try:
@@ -123,19 +92,15 @@ else:
         st.info(f"기본 파일 `{DEFAULT_FILE}` 을(를) 찾을 수 없습니다. 파일을 업로드하세요.")
 
 if df_raw is not None and not df_raw.empty:
-    # 클린업
     df = clean_dataframe(df_raw)
 
     if df.empty or {"latitude", "longitude"}.issubset(df.columns) is False:
         st.error("위도/경도 컬럼을 해석하지 못했습니다. 원본 테이블의 위도/경도 표기를 확인해주세요.")
         st.stop()
 
-    # --------------------
     # 사이드바 필터
-    # --------------------
     with st.sidebar:
         st.header("🧭 필터")
-        # 날짜 필터
         if "time" in df.columns and df["time"].notna().any():
             tmin = pd.to_datetime(df["time"].min())
             tmax = pd.to_datetime(df["time"].max())
@@ -147,7 +112,6 @@ if df_raw is not None and not df_raw.empty:
         else:
             date_range = None
 
-        # 규모 필터
         if "magnitude" in df.columns and df["magnitude"].notna().any():
             mag_min = float(np.nanmin(df["magnitude"]))
             mag_max = float(np.nanmax(df["magnitude"]))
@@ -161,7 +125,6 @@ if df_raw is not None and not df_raw.empty:
         else:
             m_lo, m_hi = None, None
 
-        # 깊이 필터
         if "depth_km" in df.columns and df["depth_km"].notna().any():
             dmin = float(np.nanmin(df["depth_km"]))
             dmax = float(np.nanmax(df["depth_km"]))
@@ -175,45 +138,29 @@ if df_raw is not None and not df_raw.empty:
         else:
             dep_lo, dep_hi = None, None
 
-        # 지역 텍스트 검색
         place_query = st.text_input("지역/위치 키워드 🔎", value="").strip()
 
-    # --------------------
     # 필터 적용
-    # --------------------
     df_f = df.copy()
-
-    # 날짜
     if date_range and "time" in df_f.columns and df_f["time"].notna().any():
         start_dt = pd.to_datetime(pd.Timestamp(date_range[0]))
-        end_dt = pd.to_datetime(pd.Timestamp(date_range[1])) + pd.Timedelta(days=1)  # inclusive
+        end_dt = pd.to_datetime(pd.Timestamp(date_range[1])) + pd.Timedelta(days=1)
         df_f = df_f[(df_f["time"] >= start_dt) & (df_f["time"] < end_dt)]
-
-    # 규모
     if m_lo is not None and m_hi is not None and "magnitude" in df_f.columns:
         df_f = df_f[df_f["magnitude"].between(m_lo, m_hi)]
-
-    # 깊이
     if dep_lo is not None and dep_hi is not None and "depth_km" in df_f.columns:
         df_f = df_f[df_f["depth_km"].between(dep_lo, dep_hi)]
-
-    # 지역 검색
     if place_query and "place" in df_f.columns:
         df_f = df_f[df_f["place"].str.contains(place_query, case=False, na=False)]
 
-    # --------------------
-    # 규모 '정수 구간' 색상 매핑 (파랑 → 빨강)
-    # --------------------
+    # 규모 정수 구간 라벨 & 색상 매핑 (파랑→빨강)
     if "magnitude" in df_f.columns and df_f["magnitude"].notna().any():
-        mag_floor = np.floor(df_f["magnitude"]).astype("Int64")  # 2.3 -> 2
-        df_f["mag_bin_label"] = mag_floor.map(
-            lambda v: f"{int(v)}.0–{int(v)}.9" if pd.notna(v) else np.nan
-        )
+        mag_floor = np.floor(df_f["magnitude"]).astype("Int64")
+        df_f["mag_bin_label"] = mag_floor.map(lambda v: f"{int(v)}.0–{int(v)}.9" if pd.notna(v) else np.nan)
         unique_bins = sorted(mag_floor.dropna().unique().tolist())
         labels_order = [f"{int(v)}.0–{int(v)}.9" for v in unique_bins]
 
-        # 파랑→빨강(Bluered)에서 균등 샘플링
-        base_scale = px.colors.sequential.Bluered
+        base_scale = px.colors.sequential.Bluered  # 0: 파랑, 1: 빨강
         def pick_color(pos):
             idx = int(round(pos * (len(base_scale) - 1)))
             return base_scale[idx]
@@ -224,9 +171,7 @@ if df_raw is not None and not df_raw.empty:
         df_f["mag_bin_label"] = np.nan
         labels_order, color_map = [], {}
 
-    # --------------------
-    # 상단 KPI
-    # --------------------
+    # KPI
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("표시 건수", f"{len(df_f):,}")
     if "magnitude" in df_f.columns and df_f["magnitude"].notna().any():
@@ -240,10 +185,8 @@ if df_raw is not None and not df_raw.empty:
     else:
         k4.metric("평균 깊이(km)", "-")
 
-    # --------------------
-    # 지도 시각화 (정수 구간별 이산 색)
-    # --------------------
-    st.subheader("🗺️ 전세계 지진 분포 (규모 정수 구간별 이산 색)")
+    # 지도
+    st.subheader("🌍 규모 정수 구간별 색상 지진 지도")
     hover_cols = []
     if "time" in df_f.columns: hover_cols.append("time")
     if "place" in df_f.columns: hover_cols.append("place")
@@ -271,9 +214,6 @@ if df_raw is not None and not df_raw.empty:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # --------------------
-    # 데이터 미리보기
-    # --------------------
     with st.expander("📄 데이터 미리보기 (필터 적용 후)"):
         st.dataframe(df_f.head(100), use_container_width=True)
 else:
