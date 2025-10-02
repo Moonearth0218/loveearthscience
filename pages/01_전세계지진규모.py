@@ -11,7 +11,7 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="🌍 전세계 지진 규모 지도", page_icon="🌍", layout="wide")
 st.title("🌍 전세계 지진 규모 지도")
-st.caption("정수 규모 구간과 진원 깊이 구간을 한 지도에서 확인할 수 있습니다. (작을수록 파랑, 클수록 빨강)")
+st.caption("정수 규모 구간과 진원 깊이 구간을 한 지도에서 확인할 수 있습니다. (작을수록 노랑→주황→진한 붉은색)")
 
 # ─────────────────────────────────────────────────────────
 # 유틸
@@ -38,18 +38,36 @@ def make_mag_bin_label(m: pd.Series) -> pd.Series:
         return f"{v}.0–{v}.9" if v < 10 else "10.0"
     return mf.map(lab)
 
+# 사용자 지정 규모 색상 스케일(노랑 → 주황 → 아주 진한 붉은색)
+# positions 0.0, 0.55, 1.0 정도로 배치해서 작은 규모는 연하고, 큰 규모는 진하게 보이게 함
+MAG_COLORSCALE = [
+    (0.00, "#FFF59D"),  # 밝은 노랑 (작은 규모)
+    (0.55, "#FB8C00"),  # 선명한 주황 (중간 규모)
+    (1.00, "#B71C1C"),  # 아주 진한 붉은색 (큰 규모)
+]
+
 def build_mag_colors(labels_order):
-    """작은 구간→파랑, 큰 구간→빨강. Bluered에서 구간 수만큼 균등 샘플링해 이산 색상으로 매핑."""
-    positions = np.linspace(0, 1, num=len(labels_order)) if labels_order else []
-    cols = px.colors.sample_colorscale("Bluered", positions)
-    return {lab: cols[i] for i, lab in enumerate(labels_order)}
+    """정수 구간 라벨들을 0→1 구간에 균등 매핑해 MAG_COLORSCALE에서 색 샘플링."""
+    if not labels_order:
+        return {}
+    # 0~10 전체 구간 기준 위치를 계산 (데이터에 존재하는 구간만 뽑음)
+    # 0~9: 'x.0–x.9', 10: '10.0' (마지막은 최댓값에 대응)
+    def bin_index(label):
+        return 10 if label == "10.0" else int(label.split(".")[0])
+    idxs = [bin_index(lab) for lab in labels_order]
+    pos = np.array(idxs) / 10.0
+    # colorscale 샘플
+    colors = []
+    for p in pos:
+        colors.append(px.colors.sample_colorscale(MAG_COLORSCALE, [p])[0])
+    return {lab: colors[i] for i, lab in enumerate(labels_order)}
 
 def depth_category(d: pd.Series) -> pd.Series:
     """깊이 구간 라벨: 천발(0–70), 중발(70–300), 심발(>300)"""
     cat = pd.Series(index=d.index, dtype=object)
-    cat[(d >= 0) & (d < 70)] = "천발(0–70km)"
+    cat[(d >= 0) & (d < 70)]  = "천발(0–70km)"
     cat[(d >= 70) & (d <= 300)] = "중발(70–300km)"
-    cat[(d > 300)] = "심발(>300km)"
+    cat[(d > 300)]            = "심발(>300km)"
     return cat
 
 # ─────────────────────────────────────────────────────────
@@ -152,8 +170,8 @@ with left:
     up = st.file_uploader("국외지진목록 파일(.xlsx, .xls, .html, .htm, .csv)", type=["xlsx","xls","html","htm","csv"])
 with right:
     st.subheader("🧪 표시 모드")
-    show_mag  = st.toggle("규모 확인 (원, 구간별-그라데이션 색)", value=True)
-    show_depth= st.toggle("깊이 확인 (삼각형, 천·중·심발 색)", value=False)
+    show_mag   = st.toggle("규모 확인 (원, 구간별-그라데이션 색)", value=True)
+    show_depth = st.toggle("깊이 확인 (삼각형, 천·중·심발 색)", value=False)
 
 if up is None:
     st.info("파일을 업로드해 주세요. (예: 국외지진목록_5개년.xlsx)")
@@ -241,7 +259,6 @@ if place_query and "place" in f.columns:
 # 레이어별 데이터 준비
 # ─────────────────────────────────────────────────────────
 traces = []
-legend = True
 
 # (A) 규모 레이어 (원, 구간별-그라데이션 색)
 if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
@@ -251,11 +268,13 @@ if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
     labels_order = [lab for lab in order_all if lab in set(f["mag_bin"].dropna().unique())]
     mag_color_map = build_mag_colors(labels_order)
 
-    # 하나의 trace로도 되지만, 범례 가독성을 위해 '구간별' trace 생성
+    # 구간별 trace (범례 가독성)
     for lab in labels_order:
         dfb = f[f["mag_bin"] == lab]
         if dfb.empty: 
             continue
+        # 규모가 클수록 원도 조금 더 크게(시각 강조)
+        size_vals = np.clip((dfb["magnitude"].fillna(dfb["magnitude"].median())*2.0), 5, 20)
         traces.append(go.Scattergeo(
             lon=dfb["longitude"], lat=dfb["latitude"],
             mode="markers",
@@ -263,10 +282,10 @@ if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
             legendgroup="magnitude", showlegend=True,
             marker=dict(
                 symbol="circle",
-                size=np.clip((dfb["magnitude"].fillna(dfb["magnitude"].median())*2), 4, 18),  # 크기는 대략 규모 비례
+                size=size_vals,
                 color=mag_color_map[lab],
                 line=dict(width=0.5, color="white"),
-                opacity=0.85,
+                opacity=0.9,
             ),
             hovertemplate="<b>규모(M)</b>: %{customdata[0]:.1f}<br>"
                           "위도: %{lat:.2f}, 경도: %{lon:.2f}<br>"
@@ -282,10 +301,11 @@ if show_depth and "depth_km" in f.columns and f["depth_km"].notna().any():
     f = f.copy()
     f["depth_cat"] = depth_category(f["depth_km"])
     depth_order = ["천발(0–70km)", "중발(70–300km)", "심발(>300km)"]
+    # 색상: 하늘색, 파란색, 어두운 푸른색
     depth_colors = {
-        "천발(0–70km)": "#FFD400",   # 노랑
-        "중발(70–300km)": "#9BE564", # 연두
-        "심발(>300km)": "#1B7F3A",  # 진한 초록
+        "천발(0–70km)": "#87CEEB",  # SkyBlue
+        "중발(70–300km)": "#1976D2", # Blue-ish
+        "심발(>300km)": "#0D47A1",  # Dark Blue
     }
     for lab in depth_order:
         dfd = f[f["depth_cat"] == lab]
@@ -298,10 +318,10 @@ if show_depth and "depth_km" in f.columns and f["depth_km"].notna().any():
             legendgroup="depth", showlegend=True,
             marker=dict(
                 symbol="triangle-up",
-                size=10,
+                size=11,
                 color=depth_colors[lab],
                 line=dict(width=0.5, color="white"),
-                opacity=0.9,
+                opacity=0.95,
             ),
             hovertemplate="<b>깊이</b>: %{customdata[0]} km<br>"
                           "위도: %{lat:.2f}, 경도: %{lon:.2f}<br>"
