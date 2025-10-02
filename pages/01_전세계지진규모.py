@@ -5,22 +5,43 @@ from pathlib import Path
 import io
 import plotly.express as px
 
-st.set_page_config(page_title="🗺️ 지진 월드맵", page_icon="🗺️", layout="wide")
+# --------------------
+# 기본 설정
+# --------------------
+st.set_page_config(page_title="🗺️ 전세계 지진 규모", page_icon="🗺️", layout="wide")
 
-st.title("🗺️ 전세계 지진 분포 (국외지진목록)")
+st.title("🗺️ 전세계 지진 규모 분석")
 st.caption("KMA 국외지진목록 데이터를 업로드하여 규모(M) 정수 구간별 색상으로 시각화합니다.")
 
 DEFAULT_FILE = "국외지진목록_2015-01-01_2025-09-29.xls"
 
+@st.cache_data(show_spinner=False)
 def read_kma_xls_like(file_obj_or_path):
-    """KMA 국외지진목록 .xls(실제는 HTML 테이블) 로딩"""
+    """
+    KMA 국외지진목록 .xls은 실제로 HTML 테이블인 경우가 많음.
+    - lxml 파서만 사용(flavor='lxml') → html5lib 의존성 제거
+    - 여러 테이블이 있으면 위도/경도/규모/깊이 컬럼 포함 여부를 기준으로 가장 적합한 테이블 선택
+    """
     try:
-        tables = pd.read_html(file_obj_or_path)  # lxml 필요
+        tables = pd.read_html(file_obj_or_path, flavor="lxml")
         if len(tables) == 0:
             raise RuntimeError("HTML에서 표를 찾지 못했습니다.")
-        return tables[0]
+
+        def score_table(df):
+            cols = [str(c).lower() for c in df.columns]
+            score = 0
+            if any(("위도" in c) or ("lat" in c) for c in cols): score += 2
+            if any(("경도" in c) or ("lon" in c) or ("lng" in c) for c in cols): score += 2
+            if any(("규모" in c) or ("mag" in c) for c in cols): score += 1
+            if any(("깊이" in c) or ("depth" in c) for c in cols): score += 1
+            if any(("발생일시" in c) or ("date" in c) or ("time" in c) for c in cols): score += 1
+            return score
+
+        tables_scored = sorted(tables, key=score_table, reverse=True)
+        return tables_scored[0]
+
     except Exception as e:
-        raise RuntimeError(f"HTML 테이블 파싱 실패: {e}")
+        raise RuntimeError(f"HTML 테이블 파싱 실패(lxml): {e}")
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
@@ -66,7 +87,9 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-# 파일 입력 영역
+# --------------------
+# 파일 입력
+# --------------------
 left, right = st.columns([1, 1])
 with left:
     st.subheader("📁 데이터 선택")
@@ -104,8 +127,7 @@ if df_raw is not None and not df_raw.empty:
         if "time" in df.columns and df["time"].notna().any():
             tmin = pd.to_datetime(df["time"].min())
             tmax = pd.to_datetime(df["time"].max())
-            date_range = st.date_input(
-                "기간 선택",
+            date_range = st.date_input("기간 선택",
                 value=(tmin.date(), tmax.date()),
                 min_value=tmin.date(), max_value=tmax.date()
             )
@@ -115,8 +137,7 @@ if df_raw is not None and not df_raw.empty:
         if "magnitude" in df.columns and df["magnitude"].notna().any():
             mag_min = float(np.nanmin(df["magnitude"]))
             mag_max = float(np.nanmax(df["magnitude"]))
-            m_lo, m_hi = st.slider(
-                "규모(M) 범위",
+            m_lo, m_hi = st.slider("규모(M) 범위",
                 min_value=float(np.floor(mag_min)),
                 max_value=float(np.ceil(mag_max)),
                 value=(float(np.floor(mag_min)), float(np.ceil(mag_max))),
@@ -128,8 +149,7 @@ if df_raw is not None and not df_raw.empty:
         if "depth_km" in df.columns and df["depth_km"].notna().any():
             dmin = float(np.nanmin(df["depth_km"]))
             dmax = float(np.nanmax(df["depth_km"]))
-            dep_lo, dep_hi = st.slider(
-                "깊이(km) 범위",
+            dep_lo, dep_hi = st.slider("깊이(km) 범위",
                 min_value=float(max(0.0, np.floor(dmin))),
                 max_value=float(np.ceil(dmax)),
                 value=(float(max(0.0, np.floor(dmin))), float(np.ceil(dmax))),
@@ -153,14 +173,14 @@ if df_raw is not None and not df_raw.empty:
     if place_query and "place" in df_f.columns:
         df_f = df_f[df_f["place"].str.contains(place_query, case=False, na=False)]
 
-    # 규모 정수 구간 라벨 & 색상 매핑 (파랑→빨강)
+    # 규모 정수 구간 라벨 & 색상 매핑
     if "magnitude" in df_f.columns and df_f["magnitude"].notna().any():
         mag_floor = np.floor(df_f["magnitude"]).astype("Int64")
         df_f["mag_bin_label"] = mag_floor.map(lambda v: f"{int(v)}.0–{int(v)}.9" if pd.notna(v) else np.nan)
         unique_bins = sorted(mag_floor.dropna().unique().tolist())
         labels_order = [f"{int(v)}.0–{int(v)}.9" for v in unique_bins]
 
-        base_scale = px.colors.sequential.Bluered  # 0: 파랑, 1: 빨강
+        base_scale = px.colors.sequential.Bluered
         def pick_color(pos):
             idx = int(round(pos * (len(base_scale) - 1)))
             return base_scale[idx]
