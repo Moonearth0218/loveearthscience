@@ -9,39 +9,63 @@ import plotly.express as px
 # 기본 설정
 # --------------------
 st.set_page_config(page_title="🗺️ 전세계 지진 규모", page_icon="🗺️", layout="wide")
-
 st.title("🗺️ 전세계 지진 규모 분석")
 st.caption("KMA 국외지진목록 데이터를 업로드하여 규모(M) 정수 구간별 색상으로 시각화합니다.")
 
 DEFAULT_FILE = "국외지진목록_2015-01-01_2025-09-29.xls"
 
+# ---------- 새 로더: 형식 자동 분기 ----------
 @st.cache_data(show_spinner=False)
-def read_kma_xls_like(file_obj_or_path):
+def load_quakes(file_bytes: bytes, filename: str = "uploaded") -> pd.DataFrame:
     """
-    KMA 국외지진목록 .xls은 실제로 HTML 테이블인 경우가 많음.
-    - lxml 파서만 사용(flavor='lxml') → html5lib 의존성 제거
-    - 여러 테이블이 있으면 위도/경도/규모/깊이 컬럼 포함 여부를 기준으로 가장 적합한 테이블 선택
+    업로드된 바이트를 검사해 형식별로 안전하게 읽는다.
+    지원: HTML(UTF-8/CP949/EUC-KR), XLS(legacy), XLSX, CSV
     """
+    b = file_bytes
+    head = b[:64].lstrip()
+
+    # 1) XLSX (ZIP 시그니처: PK)
+    if head.startswith(b"PK"):
+        return pd.read_excel(io.BytesIO(b), engine="openpyxl")
+
+    # 2) Legacy XLS (OLE2 시그니처: D0 CF 11 E0 A1 B1 1A E1)
+    if head.startswith(b"\xD0\xCF\x11\xE0"):
+        # xlrd는 xls만 지원
+        return pd.read_excel(io.BytesIO(b), engine="xlrd")
+
+    # 3) HTML (.xls이지만 사실 HTML 테이블인 경우)
+    if head.startswith(b"<!DOCTYPE") or head.startswith(b"<html") or b"<table" in b[:4096].lower():
+        # 인코딩 추정 없이 순차 시도 (추가 라이브러리 없이 처리)
+        for enc in ["utf-8", "cp949", "euc-kr"]:
+            try:
+                text = b.decode(enc, errors="strict")
+                tables = pd.read_html(io.StringIO(text), flavor="lxml")
+                if len(tables):
+                    return tables[0]
+            except Exception:
+                continue
+        # 느슨 모드(깨진 글자는 무시)
+        try:
+            text = b.decode("cp949", errors="ignore")
+            tables = pd.read_html(io.StringIO(text), flavor="lxml")
+            if len(tables):
+                return tables[0]
+        except Exception as e:
+            raise RuntimeError(f"HTML 테이블 파싱 실패(lxml, 인코딩): {e}")
+
+    # 4) CSV 가능성 (쉼표/탭 자동 추정)
     try:
-        tables = pd.read_html(file_obj_or_path, flavor="lxml")
-        if len(tables) == 0:
-            raise RuntimeError("HTML에서 표를 찾지 못했습니다.")
+        return pd.read_csv(io.BytesIO(b))
+    except Exception:
+        pass
+    try:
+        return pd.read_csv(io.BytesIO(b), sep="\t")
+    except Exception:
+        pass
 
-        def score_table(df):
-            cols = [str(c).lower() for c in df.columns]
-            score = 0
-            if any(("위도" in c) or ("lat" in c) for c in cols): score += 2
-            if any(("경도" in c) or ("lon" in c) or ("lng" in c) for c in cols): score += 2
-            if any(("규모" in c) or ("mag" in c) for c in cols): score += 1
-            if any(("깊이" in c) or ("depth" in c) for c in cols): score += 1
-            if any(("발생일시" in c) or ("date" in c) or ("time" in c) for c in cols): score += 1
-            return score
-
-        tables_scored = sorted(tables, key=score_table, reverse=True)
-        return tables_scored[0]
-
-    except Exception as e:
-        raise RuntimeError(f"HTML 테이블 파싱 실패(lxml): {e}")
+    raise RuntimeError(
+        f"알 수 없는 형식입니다. 파일명: {filename} (선두 바이트: {head[:16]!r})"
+    )
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
@@ -84,7 +108,6 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         out = out[(out["latitude"].between(-90, 90)) & (out["longitude"].between(-180, 180))]
     if "time" in out:
         out = out.sort_values("time").reset_index(drop=True)
-
     return out
 
 # --------------------
@@ -93,21 +116,23 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 left, right = st.columns([1, 1])
 with left:
     st.subheader("📁 데이터 선택")
-    up = st.file_uploader("국외지진목록(.xls / HTML 테이블 형식) 파일 업로드", type=["xls", "html", "htm"])
+    up = st.file_uploader("국외지진목록 파일 업로드 (.xls, .xlsx, .html, .htm, .csv)", type=["xls", "xlsx", "html", "htm", "csv"])
     use_default = st.toggle(f"기본 파일명 사용: `{DEFAULT_FILE}`", value=True)
 
+# 데이터 읽기
 df_raw = None
 if up is not None:
     try:
-        content = io.BytesIO(up.read())
-        df_raw = read_kma_xls_like(content)
+        buf = up.read()
+        df_raw = load_quakes(buf, filename=up.name)
     except Exception as e:
         st.error("파일을 읽는 중 오류가 발생했습니다.")
         st.exception(e)
 else:
     if use_default and Path(DEFAULT_FILE).exists():
         try:
-            df_raw = read_kma_xls_like(DEFAULT_FILE)
+            with open(DEFAULT_FILE, "rb") as f:
+                df_raw = load_quakes(f.read(), filename=DEFAULT_FILE)
         except Exception as e:
             st.error("기본 파일을 읽는 중 오류가 발생했습니다.")
             st.exception(e)
@@ -121,7 +146,7 @@ if df_raw is not None and not df_raw.empty:
         st.error("위도/경도 컬럼을 해석하지 못했습니다. 원본 테이블의 위도/경도 표기를 확인해주세요.")
         st.stop()
 
-    # 사이드바 필터
+    # -------- 사이드바 필터 --------
     with st.sidebar:
         st.header("🧭 필터")
         if "time" in df.columns and df["time"].notna().any():
@@ -160,7 +185,7 @@ if df_raw is not None and not df_raw.empty:
 
         place_query = st.text_input("지역/위치 키워드 🔎", value="").strip()
 
-    # 필터 적용
+    # -------- 필터 적용 --------
     df_f = df.copy()
     if date_range and "time" in df_f.columns and df_f["time"].notna().any():
         start_dt = pd.to_datetime(pd.Timestamp(date_range[0]))
@@ -173,14 +198,14 @@ if df_raw is not None and not df_raw.empty:
     if place_query and "place" in df_f.columns:
         df_f = df_f[df_f["place"].str.contains(place_query, case=False, na=False)]
 
-    # 규모 정수 구간 라벨 & 색상 매핑
+    # -------- 규모 정수 구간 라벨 & 색상 --------
     if "magnitude" in df_f.columns and df_f["magnitude"].notna().any():
         mag_floor = np.floor(df_f["magnitude"]).astype("Int64")
         df_f["mag_bin_label"] = mag_floor.map(lambda v: f"{int(v)}.0–{int(v)}.9" if pd.notna(v) else np.nan)
         unique_bins = sorted(mag_floor.dropna().unique().tolist())
         labels_order = [f"{int(v)}.0–{int(v)}.9" for v in unique_bins]
 
-        base_scale = px.colors.sequential.Bluered
+        base_scale = px.colors.sequential.Bluered  # 파랑→빨강
         def pick_color(pos):
             idx = int(round(pos * (len(base_scale) - 1)))
             return base_scale[idx]
@@ -191,7 +216,7 @@ if df_raw is not None and not df_raw.empty:
         df_f["mag_bin_label"] = np.nan
         labels_order, color_map = [], {}
 
-    # KPI
+    # -------- KPI --------
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("표시 건수", f"{len(df_f):,}")
     if "magnitude" in df_f.columns and df_f["magnitude"].notna().any():
@@ -205,14 +230,13 @@ if df_raw is not None and not df_raw.empty:
     else:
         k4.metric("평균 깊이(km)", "-")
 
-    # 지도
+    # -------- 지도 --------
     st.subheader("🌍 규모 정수 구간별 색상 지진 지도")
     hover_cols = []
     if "time" in df_f.columns: hover_cols.append("time")
     if "place" in df_f.columns: hover_cols.append("place")
     if "depth_km" in df_f.columns: hover_cols.append("depth_km")
     if "magnitude" in df_f.columns: hover_cols.append("magnitude")
-
     size_col = "magnitude" if "magnitude" in df_f.columns else None
 
     fig = px.scatter_geo(
@@ -228,13 +252,11 @@ if df_raw is not None and not df_raw.empty:
         hover_data=hover_cols,
         projection="natural earth",
     )
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-        legend_title_text="규모 구간(M)"
-    )
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), legend_title_text="규모 구간(M)")
     st.plotly_chart(fig, use_container_width=True)
 
     with st.expander("📄 데이터 미리보기 (필터 적용 후)"):
         st.dataframe(df_f.head(100), use_container_width=True)
+
 else:
     st.info("왼쪽에서 파일을 업로드하거나, 기본 파일이 있을 경우 토글을 켜서 불러오세요.")
