@@ -2,8 +2,8 @@ streamlit
 pandas
 numpy
 plotly
-lxml      # HTML 테이블 파싱
-html5lib   # read_html 파서 옵션
-beautifulsoup4  # HTML fallback
-openpyxl    # .xlsx
-xlrd      # .xls(legacy)
+lxml
+html5lib
+beautifulsoup4
+openpyxl
+xlrd
