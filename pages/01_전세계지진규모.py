@@ -10,12 +10,13 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="🌍 전세계 지진 규모 지도", page_icon="🌍", layout="wide")
 st.title("🌍 전세계 지진 규모 지도")
-st.caption("정수 규모 구간(0.0–0.9, …, 9.0–9.9, 10.0)과 진원 깊이 구간을 한 지도에서 확인합니다. (규모: 살구→주황→적색→암적색)")
+st.caption("정수 규모 구간과 진원 깊이 구간을 한 지도에서 확인합니다. (규모: 노랑→주황→적색, 깊이: 하늘→파랑→짙은 파랑)")
 
 # ─────────────────────────────────────────────────────────
 # 유틸
 # ─────────────────────────────────────────────────────────
 def parse_coord(series: pd.Series, kind: str) -> pd.Series:
+    """'24.72 N' / '66.67 W' 같은 표기를 숫자로 변환. kind='lat'는 S 음수, 'lon'은 W 음수."""
     s = series.astype(str).str.strip()
     num = pd.to_numeric(s.str.extract(r'([-+]?\d+(?:\.\d+)?)')[0], errors="coerce")
     if kind == "lat":
@@ -27,6 +28,7 @@ def to_num(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series.astype(str).str.replace(",", ""), errors="coerce")
 
 def make_mag_bin_label(m: pd.Series) -> pd.Series:
+    """0.0–0.9, 1.0–1.9, …, 9.0–9.9, 10.0"""
     mf = np.floor(m).astype("Int64").clip(lower=0, upper=10)
     def lab(v):
         if pd.isna(v): return np.nan
@@ -34,29 +36,22 @@ def make_mag_bin_label(m: pd.Series) -> pd.Series:
         return f"{v}.0–{v}.9" if v < 10 else "10.0"
     return mf.map(lab)
 
-# ★ 새: 파랑 없는 Warm 그라데이션 팔레트(밝은 살구 → 호박 → 주황 → 적색 → 암적색)
-WARM_SCALE = [
-    (0.00, "#FFF3E0"),  # very light apricot
-    (0.25, "#FFB300"),  # amber
-    (0.45, "#FB8C00"),  # orange
-    (0.70, "#E53935"),  # vivid red
-    (0.88, "#B71C1C"),  # dark red
-    (1.00, "#4A0C0C"),  # maroon
-]
-
 def build_mag_colors(labels_order):
-    """정수 구간 라벨(0~10)을 0~1로 정규화해 WARM_SCALE에서 샘플링 → 구간별 이산 색상"""
+    """
+    정수 구간(0~10)을 [0,1]로 정규화 후 Plotly 내장 'OrRd'에서 샘플링.
+    파랑 없이 노랑→주황→적색. 큰 값쪽이 더 선명해지도록 감마(1.2) 적용.
+    """
     if not labels_order:
         return {}
-    def bin_index(label):  # '10.0'은 최댓값으로
+    def bin_index(label):  # '10.0'은 최댓값
         return 10 if label == "10.0" else int(label.split(".")[0])
-    # 너무 밝은 쪽이 몰리지 않도록 살짝 감마 보정(1.15)
     raw = np.array([bin_index(l) for l in labels_order], dtype=float) / 10.0
-    pos = np.clip(raw**1.15, 0, 1).tolist()
-    sampled = px.colors.sample_colorscale(WARM_SCALE, pos)
+    pos = np.clip(raw**1.2, 0, 1).tolist()
+    sampled = px.colors.sample_colorscale("OrRd", pos)  # ← 안전한 내장 스케일
     return dict(zip(labels_order, sampled))
 
 def depth_category(d: pd.Series) -> pd.Series:
+    """깊이 구간: 천발(0–70), 중발(70–300), 심발(>300)"""
     cat = pd.Series(index=d.index, dtype=object)
     cat[(d >= 0) & (d < 70)]     = "천발(0–70km)"
     cat[(d >= 70) & (d <= 300)]  = "중발(70–300km)"
@@ -70,10 +65,13 @@ def depth_category(d: pd.Series) -> pd.Series:
 def load_quakes(file_bytes: bytes, filename: str = "uploaded") -> pd.DataFrame:
     b = file_bytes or b""
     head = b[:64].lstrip()
-    if head.startswith(b"PK"):  # XLSX
+    # XLSX
+    if head.startswith(b"PK"):
         return pd.read_excel(io.BytesIO(b), engine="openpyxl")
-    if head.startswith(b"\xD0\xCF\x11\xE0"):  # XLS
+    # XLS (OLE)
+    if head.startswith(b"\xD0\xCF\x11\xE0"):
         return pd.read_excel(io.BytesIO(b), engine="xlrd")
+    # HTML로 저장된 xls 가능성
     looks_html = head.startswith(b"<!DOCTYPE") or head.startswith(b"<html") or (b"<table" in b[:8192].lower())
     if looks_html:
         for enc in ["utf-8", "cp949", "euc-kr"]:
@@ -88,6 +86,7 @@ def load_quakes(file_bytes: bytes, filename: str = "uploaded") -> pd.DataFrame:
                         pass
             except Exception:
                 pass
+        # BeautifulSoup fallback
         try:
             from bs4 import BeautifulSoup
             text = b.decode("cp949", errors="ignore")
@@ -100,6 +99,7 @@ def load_quakes(file_bytes: bytes, filename: str = "uploaded") -> pd.DataFrame:
         except Exception:
             pass
         raise RuntimeError("HTML 테이블을 찾지 못했습니다. (html5lib/lxml/bs4 모두 실패)")
+    # CSV (, / \t / ;)
     for kwargs in [dict(), dict(sep="\t"), dict(sep=";")]:
         try:
             return pd.read_csv(io.BytesIO(b), **kwargs)
@@ -188,9 +188,9 @@ if not {"latitude","longitude"}.issubset(clean.columns):
         st.error("위도/경도는 반드시 지정해야 합니다.")
         st.stop()
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 # 사이드바 필터
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🧭 필터")
     if "time" in clean.columns and clean["time"].notna().any():
@@ -232,7 +232,7 @@ if place_query and "place" in f.columns:
 # ─────────────────────────────────────────────────────────
 traces = []
 
-# (A) 규모 레이어: Non-Blue 그라데이션에서 구간별 색 샘플링
+# (A) 규모 레이어: OrRd에서 구간별 색 샘플링 (파랑 없음)
 if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
     f_mag = f.copy()
     f_mag["mag_bin"] = make_mag_bin_label(f_mag["magnitude"])
@@ -254,7 +254,7 @@ if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
                 symbol="circle",
                 size=size_vals,
                 color=mag_color_map[lab],
-                line=dict(width=0.7, color="white"),
+                line=dict(width=0.8, color="white"),
                 opacity=0.95,
             ),
             hovertemplate="<b>규모(M)</b>: %{customdata[0]:.1f}<br>"
@@ -266,7 +266,7 @@ if show_mag and "magnitude" in f.columns and f["magnitude"].notna().any():
             ], axis=1)
         ))
 
-# (B) 깊이 레이어: 그대로 유지(하늘/파랑/짙은 파랑)
+# (B) 깊이 레이어: 그대로(하늘/파랑/짙은 파랑)
 if show_depth and "depth_km" in f.columns and f["depth_km"].notna().any():
     f_dep = f.copy()
     f_dep["depth_cat"] = depth_category(f_dep["depth_km"])
