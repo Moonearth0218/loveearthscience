@@ -64,8 +64,7 @@ def load_data(uploaded_file):
     if uploaded_file is not None:
         try:
             bio = io.BytesIO(uploaded_file.read())
-            xls = pd.ExcelFile(bio)
-            sheet = xls.sheet_names[0]
+            xls = pd.ExcelFile(bio); sheet = xls.sheet_names[0]
             return clean_dataframe(pd.read_excel(bio, sheet_name=sheet)), "uploaded"
         except Exception as e:
             st.error(f"업로드 파일 읽기 오류: {e}")
@@ -81,10 +80,10 @@ def load_data(uploaded_file):
 
 # ------------------ 색상 변환 ------------------
 def magnitude_to_color(m, m_min, m_max):
-    """규모를 0~1로 정규화 후 HSV→RGB로 변환 (파랑→빨강)"""
+    """규모를 0~1 정규화 후 HSV→RGB 변환 (파랑→빨강)"""
     ratio = (m - m_min) / (m_max - m_min + 1e-9)
     ratio = np.clip(ratio, 0, 1)
-    r, g, b = colorsys.hsv_to_rgb(0.66 * (1 - ratio), 1, 1)
+    r, g, b = colorsys.hsv_to_rgb(0.66 * (1 - ratio), 1, 1)  # 0.66=파랑, 0=빨강
     return [int(r*255), int(g*255), int(b*255)]
 
 def rgb_to_hex(rgb):
@@ -95,7 +94,7 @@ def add_vis_columns(df, fixed_radius_m: float):
     vis["발생시각_str"] = vis["발생시각"].dt.strftime("%Y-%m-%d %H:%M:%S")
     m_min, m_max = vis["규모"].min(), vis["규모"].max()
     vis["color"] = vis["규모"].apply(lambda m: magnitude_to_color(m, m_min, m_max))
-    vis["radius_m"] = float(fixed_radius_m)
+    vis["radius_m"] = float(fixed_radius_m)  # 모든 점 동일 크기
     return vis
 
 # ------------------ 업로더 ------------------
@@ -144,7 +143,7 @@ else:
     st.write(f"선택된 조건: **{len(df):,}건**  · 데이터 소스: **{data_source}**")
 
     vis = add_vis_columns(df, fixed_radius_m)
-    m_min, m_max = vis["규모"].min(), vis["규모"].max()
+    m_min, m_max = float(vis["규모"].min()), float(vis["규모"].max())
 
     view_state = pdk.ViewState(latitude=36.5, longitude=127.8, zoom=5.3, pitch=0)
     scatter_layer = pdk.Layer(
@@ -172,33 +171,40 @@ else:
     )
     st.pydeck_chart(deck, use_container_width=True)
 
-    # ------------------ 색상 범례 ------------------
-    color_bar = []
+    # ------------------ 색상 범례 (컬러바 바로 아래 눈금 표시) ------------------
+    # 1) 그라데이션 CSS 생성
+    gradient_stops = []
     for i in range(0, 101, 2):
         ratio = i / 100
-        rgb = magnitude_to_color(m_min + ratio*(m_max-m_min), m_min, m_max)
-        color_bar.append(f"{rgb_to_hex(rgb)} {i}%")
-    gradient_css = "linear-gradient(90deg, " + ", ".join(color_bar) + ")"
+        rgb = magnitude_to_color(m_min + ratio*(m_max - m_min), m_min, m_max)
+        gradient_stops.append(f"{rgb_to_hex(rgb)} {i}%")
+    gradient_css = "linear-gradient(90deg, " + ", ".join(gradient_stops) + ")"
 
-    # 명확한 눈금 표시
-    tick_values = np.linspace(m_min, m_max, 6)
-    tick_labels = " | ".join(f"M {t:.1f}" for t in tick_values)
+    # 2) 눈금 값/위치 (컬러바 바로 아래 중앙정렬)
+    tick_vals = np.linspace(m_min, m_max, 6)  # 6개 눈금
+    tick_pos = np.linspace(0, 100, len(tick_vals))  # %
+    tick_spans = "".join(
+        f'<span style="position:absolute;left:{p:.1f}%;transform:translateX(-50%);'
+        f'font-size:12px;color:#333;">M {v:.1f}</span>'
+        for v, p in zip(tick_vals, tick_pos)
+    )
 
     legend_html = f"""
-    <div style="margin-top:15px;padding:12px 14px;border:1px solid #e0e0e0;
-                border-radius:10px;background:#fafafa;">
-        <div style="font-weight:600;margin-bottom:8px;">규모–색상 안내</div>
-        <div style="height:16px;border-radius:8px;background:{gradient_css};
-                    border:1px solid #bbb;"></div>
-        <div style="display:flex;justify-content:space-between;margin-top:6px;
-                    font-size:13px;color:#444;">
-            <span>작은 규모 (파랑)</span>
-            <span>{tick_labels}</span>
-            <span>큰 규모 (빨강)</span>
+    <div style="margin-top:16px;padding:14px;border:1px solid #e0e0e0;border-radius:12px;background:#fff;">
+      <div style="font-weight:700;margin-bottom:10px;">규모–색상 안내</div>
+
+      <div style="position:relative;">
+        <!-- 컬러바 -->
+        <div style="height:18px;border-radius:9px;background:{gradient_css};border:1px solid #bbb;"></div>
+        <!-- 눈금 라벨 (컬러바 바로 아래) -->
+        <div style="position:relative;height:22px;margin-top:6px;">
+          {tick_spans}
         </div>
-        <div style="font-size:12px;color:#666;margin-top:5px;">
-            ※ 원의 크기는 동일하며, 색상만 규모를 나타냅니다.
-        </div>
+      </div>
+
+      <div style="font-size:12px;color:#666;margin-top:6px;">
+        ※ 원의 크기는 동일하며, 색상만 규모를 나타냅니다. (파랑: 작은 규모 → 빨강: 큰 규모)
+      </div>
     </div>
     """
     st.markdown(legend_html, unsafe_allow_html=True)
